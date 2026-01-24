@@ -16,7 +16,7 @@ from components.model import GPTModel
 
 
 
-base_encoding= tiktoken.get_encoding("cl100k_base")
+base_encoding= tiktoken.get_encoding("r50k_base")
 special_tokens={
   "[INST]": base_encoding.n_vocab,
   "[/INST]": base_encoding.n_vocab + 1,
