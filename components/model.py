@@ -50,7 +50,7 @@ class MultiHeadAttention(nn.Module):
         # built-in scaled dot product attention for efficiency
         attn_out = F.scaled_dot_product_attention(
             q, k, v,
-            attn_mask=attn_mask,
+            # attn_mask=attn_mask,
             dropout_p=self.dropout.p if self.training else 0.0,
             is_causal=True,
         )

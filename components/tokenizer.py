@@ -15,27 +15,23 @@ from datasets import load_dataset
 from components.model import GPTModel
 
 
-tokenizer = tiktoken.get_encoding("gpt2")
 
-base_encoding = tiktoken.get_encoding("gpt2")
-
-special_tokens = {
-    "[INST]": base_encoding.n_vocab,  # next available token id
-    "[/INST]": base_encoding.n_vocab + 1,
+base_encoding= tiktoken.get_encoding("cl100k_base")
+special_tokens={
+  "[INST]": base_encoding.n_vocab,
+  "[/INST]": base_encoding.n_vocab + 1,
+  "[STARTOFTEXT]": base_encoding.n_vocab + 2,
+  "[ENDOFTEXT]": base_encoding.n_vocab + 3,
 }
-
-# 3. Create a new encoding that merges GPT‑2’s tokens + your special tokens
 tokenizer = tiktoken.Encoding(
-    name="gpt2_with_inst",
-    pat_str=base_encoding._pat_str,
-    mergeable_ranks=base_encoding._mergeable_ranks,
-    special_tokens={**base_encoding._special_tokens, **special_tokens},
+  name="bob",
+  pat_str=base_encoding._pat_str,
+  mergeable_ranks=base_encoding._mergeable_ranks,
+  special_tokens={**base_encoding._special_tokens, **special_tokens}
 )
-
-
 def encode(text):
-    return tokenizer.encode(text, allowed_special={"[INST]", "[/INST]"})
+  return tokenizer.encode(text, allowed_special={"[INST]", "[/INST]", "[STARTOFTEXT]", "[ENDOFTEXT]"})
 
+def decode(text):
+  return tokenizer.decode(text)
 
-def decode(tokens):
-    return tokenizer.decode(tokens)
