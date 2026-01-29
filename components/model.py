@@ -23,8 +23,41 @@ import torch.nn.functional as F
 import math
 
 
+class RotaryEmbedding(nn.Module):
+    def __init__(self, head_dim, max_seq_len, base=10000):
+        super().__init__()
+        assert head_dim % 2 == 0, "RoPE requires even head_dim"
+        self.head_dim = head_dim
+        half = head_dim // 2
+
+        freqs = torch.arange(half, dtype=torch.float32)
+        inv_freq = 1.0 / (base ** (freqs / half))
+        t = torch.arange(max_seq_len, dtype=torch.float32)
+        angles = t[:, None] * inv_freq[None, :]
+        sin = angles.sin()
+        cos = angles.cos()
+
+        # cached on CPU; will be moved to device with the module
+        self.register_buffer("sin_cached", sin, persistent=False)
+        self.register_buffer("cos_cached", cos, persistent=False)
+
+    def forward(self, q, k):
+        # q,k: (B, H, T, D)
+        B, H, T, D = q.shape
+        half = D // 2
+        sin = self.sin_cached[:T].to(q.dtype).to(q.device)  # (T, half)
+        cos = self.cos_cached[:T].to(q.dtype).to(q.device)
+
+        q1, q2 = q[..., :half], q[..., half:]
+        k1, k2 = k[..., :half], k[..., half:]
+
+        q_rot = torch.cat([q1 * cos - q2 * sin, q1 * sin + q2 * cos], dim=-1)
+        k_rot = torch.cat([k1 * cos - k2 * sin, k1 * sin + k2 * cos], dim=-1)
+        return q_rot, k_rot
+
+
 class MultiHeadAttention(nn.Module):
-    def __init__(self, n_embedding, n_heads, dropout_p):
+    def __init__(self, n_embedding, n_heads, dropout_p, max_seq_len):
         super().__init__()
         assert n_embedding % n_heads == 0
         self.n_heads = n_heads
@@ -35,6 +68,7 @@ class MultiHeadAttention(nn.Module):
         self.v_proj = nn.Linear(n_embedding, n_embedding)
         self.out_proj = nn.Linear(n_embedding, n_embedding)
         self.dropout = nn.Dropout(dropout_p)
+        self.rope = RotaryEmbedding(self.head_dim, max_seq_len=max_seq_len)
 
     def forward(self, x, attn_mask=None):
         B, T, C = x.shape  # batch size, seq length, embedding dim
@@ -46,6 +80,7 @@ class MultiHeadAttention(nn.Module):
         v = self.v_proj(x).view(B, T, self.n_heads,
                                 self.head_dim).transpose(1, 2)
         # c, embd dim split into n_heads x head_dim
+        q, k = self.rope(q, k)
 
         # built-in scaled dot product attention for efficiency
         attn_out = F.scaled_dot_product_attention(
@@ -74,11 +109,11 @@ class FeedForward(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, n_embedding, n_heads, dropout_p):
+    def __init__(self, n_embedding, n_heads, dropout_p, max_seq_len):
         super().__init__()
         self.ln1 = nn.LayerNorm(n_embedding)
         self.ln2 = nn.LayerNorm(n_embedding)
-        self.attn = MultiHeadAttention(n_embedding, n_heads, dropout_p)
+        self.attn = MultiHeadAttention(n_embedding, n_heads, dropout_p, max_seq_len)
         self.ff = FeedForward(n_embedding, dropout_p)
 
     def forward(self, x, attn_mask=None):
@@ -91,9 +126,9 @@ class GPTModel(nn.Module):
     def __init__(self, vocab_size, n_embedding, n_layers, n_heads, dropout_p, block_size):
         super().__init__()
         self.token_embed = nn.Embedding(vocab_size, n_embedding)
-        self.pos_embed = nn.Embedding(block_size, n_embedding)
+        # self.pos_embed = nn.Embedding(block_size, n_embedding)
         self.blocks = nn.ModuleList([
-            TransformerBlock(n_embedding, n_heads, dropout_p)
+            TransformerBlock(n_embedding, n_heads, dropout_p, block_size)
             for _ in range(n_layers)
         ])
         self.ln_f = nn.LayerNorm(n_embedding)
@@ -105,8 +140,9 @@ class GPTModel(nn.Module):
         B, T = idx.shape
         assert T <= self.block_size, "Sequence exceeds block size."
 
-        pos = torch.arange(0, T, device=idx.device).unsqueeze(0)
-        x = self.token_embed(idx) + self.pos_embed(pos)
+        # pos = torch.arange(0, T, device=idx.device).unsqueeze(0)
+        # x = self.token_embed(idx) + self.pos_embed(pos)
+        x = self.token_embed(idx)
         x = self.dropout(x)
 
         # Causal mask for decoder: prevent attending to future tokens

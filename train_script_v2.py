@@ -28,7 +28,7 @@ num_workers = 4
 train_model = True
 save_model = True
 save_path = "checkpoints/v2.pth"
-load_model = True
+load_model = False
 load_path = "checkpoints/v2.pth"
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
