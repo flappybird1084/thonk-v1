@@ -58,6 +58,8 @@ save_path = "checkpoints/v1.pth"
 load_model = True
 load_path = "checkpoints/v1.pth"
 device = "cuda" if torch.cuda.is_available() else "cpu"
+checkpoint_path = "checkpoints/v1.pth"
+checkpoint_interval = 1000
 
 dataset = TextDataset(base_dataset, block_size)
 
@@ -88,7 +90,7 @@ if load_model:
 if train_model:
     compiled_model = torch.compile(model)
     # scaler = torch.amp.GradScaler('cuda')
-    pbar = tqdm(total=max_iters)
+    pbar = tqdm(total=max_iters, ncols=100)
     data_iter = iter(dataloader)
     for i in range(max_iters):
         try:
@@ -115,6 +117,9 @@ if train_model:
         if i % pbar_update_interval == 0:
             pbar.set_postfix({'loss': f'{loss.item():.4f}'})
             pbar.update(pbar_update_interval)
+
+        if i % checkpoint_interval == 0:
+            torch.save(model.state_dict(), checkpoint_path)
     if save_model:
         torch.save(model.state_dict(), save_path)
         print(f"model saved to {save_path}")
