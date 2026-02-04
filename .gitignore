@@ -10,3 +10,5 @@ wheels/
 .venv
 
 checkpoints/
+lightning_logs/
+tb_logs/

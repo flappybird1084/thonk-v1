@@ -1,0 +1,1 @@
+uv run tensorboard --logdir tb_logs --host 0.0.0.0 --port 6006 6006
