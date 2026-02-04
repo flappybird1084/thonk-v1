@@ -64,6 +64,8 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 checkpoint_path = "checkpoints/v1-pl.pth"
 checkpoint_interval = 1000
 tensorboard_logdir = "tb_logs"
+use_fused_optimizer = False
+use_compile = True
 
 torch.set_float32_matmul_precision("high")
 
@@ -104,7 +106,14 @@ class LitGPT(pl.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.model.parameters(), lr=learning_rate)
+        if use_fused_optimizer and self.device.type == "cuda":
+            try:
+                return torch.optim.AdamW(
+                    self.model.parameters(), lr=learning_rate, fused=True
+                )
+            except Exception as e:
+                print(f"fused AdamW not available, using AdamW: {e}")
+        return torch.optim.AdamW(self.model.parameters(), lr=learning_rate)
 
     def on_train_end(self):
         if save_model:
@@ -166,6 +175,11 @@ if train_model:
         gradient_clip_val=1.0,
     )
     model = LitGPT()
+    if use_compile:
+        try:
+            model = torch.compile(model)
+        except Exception as e:
+            print(f"torch.compile failed, running eager: {e}")
     data_module = TextDataModule()
 
     text_ctx = torch.tensor(encode("the output vector is B,T,logits")).unsqueeze(0)
@@ -174,6 +188,11 @@ if train_model:
     trainer.fit(model, datamodule=data_module)
 else:
     model = LitGPT()
+    if use_compile:
+        try:
+            model = torch.compile(model)
+        except Exception as e:
+            print(f"torch.compile failed, running eager: {e}")
 
 model = model.to(device)
 
