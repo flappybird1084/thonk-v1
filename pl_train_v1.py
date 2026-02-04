@@ -6,7 +6,6 @@ from torch.utils.data import DataLoader
 import tiktoken
 from datasets import load_dataset
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint
 from tqdm import tqdm
 
 from components.dataset import TextDataset
@@ -46,13 +45,12 @@ base_dataset = load_dataset("HuggingFaceFW/fineweb-edu", "default", streaming=Tr
 
 block_size = 256
 n_embedding = 256
-n_layers = 8
+n_layers = 24
 n_heads = 8
 dropout_p = 0.1
-batch_size = 32
+batch_size = 64
 learning_rate = 1e-4
-# max_iters = 1000000
-max_iters = 1000
+max_iters = 1000000
 pbar_update_interval = 2
 num_workers = 4
 train_model = True
@@ -156,20 +154,14 @@ def generate_text(
 
 
 if train_model:
-    checkpoint_cb = ModelCheckpoint(
-        dirpath="checkpoints",
-        filename="v1-step{step}",
-        save_top_k=-1,
-        every_n_train_steps=checkpoint_interval,
-    )
     trainer = pl.Trainer(
         max_steps=max_iters,
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1,
         precision="bf16-mixed" if torch.cuda.is_available() else 32,
         log_every_n_steps=pbar_update_interval,
-        enable_checkpointing=True,
-        callbacks=[checkpoint_cb, SimpleCheckpointCallback()],
+        enable_checkpointing=False,
+        callbacks=[SimpleCheckpointCallback()],
         logger=True,
         default_root_dir=tensorboard_logdir,
         gradient_clip_val=1.0,
