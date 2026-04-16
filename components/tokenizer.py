@@ -30,8 +30,11 @@ tokenizer = tiktoken.Encoding(
   special_tokens={**base_encoding._special_tokens, **special_tokens}
 )
 def encode(text):
-  return tokenizer.encode(text, allowed_special={"[INST]", "[/INST]", "[STARTOFTEXT]", "[ENDOFTEXT]"})
+  return tokenizer.encode(
+    text,
+    allowed_special={"[INST]", "[/INST]", "[STARTOFTEXT]", "[ENDOFTEXT]"},
+    disallowed_special=(),
+  )
 
 def decode(text):
   return tokenizer.decode(text)
-
