@@ -16,16 +16,16 @@ from components.tokenizer import decode, encode, tokenizer
 @dataclass
 class TrainConfig:
     block_size: int = 256
-    n_embedding: int = 256
-    n_layers: int = 16
-    n_heads: int = 8
+    n_embedding: int = 1024
+    n_layers: int = 24
+    n_heads: int = 16
     dropout_p: float = 0.1
 
-    pretrain_batch_size: int = 48
-    sft_batch_size: int = 32
-    pretrain_steps: int = 100_000
-    sft1_steps: int = 20_000
-    sft2_steps: int = 20_000
+    pretrain_batch_size: int = 16
+    sft_batch_size: int = 12
+    pretrain_steps: int = 500000
+    sft1_steps: int = 80000
+    sft2_steps: int = 80000
     pretrain_learning_rate: float = 3e-4
     sft1_learning_rate: float = 5e-5
     sft2_learning_rate: float = 3e-5
@@ -40,9 +40,9 @@ class TrainConfig:
     compile_model: bool = True
     log_every: int = 10
     ckpt_dir: str = "checkpoints"
-    pretrain_ckpt_name: str = "v4_pretrain.pth"
-    sft1_ckpt_name: str = "v4_sft1_chatbot_instruction_prompts.pth"
-    sft2_ckpt_name: str = "v4_sft2_alpaca.pth"
+    pretrain_ckpt_name: str = "v4_pretrain-2.pth"
+    sft1_ckpt_name: str = "v4_sft1_chatbot_instruction_prompts-2.pth"
+    sft2_ckpt_name: str = "v4_sft2_alpaca-2.pth"
     resume_pretrain_if_available: bool = True
     resume_sft1_if_available: bool = True
 
@@ -187,7 +187,9 @@ def build_model(cfg: TrainConfig) -> GPTModel:
     )
 
 
-def build_optimizer(model: nn.Module, learning_rate: float, weight_decay: float, device: str):
+def build_optimizer(
+    model: nn.Module, learning_rate: float, weight_decay: float, device: str
+):
     decay = []
     no_decay = []
     for name, param in model.named_parameters():
@@ -372,6 +374,8 @@ def main():
     model = build_model(cfg).to(cfg.device)
     train_model = torch.compile(model) if cfg.compile_model else model
     loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Model parameters: {total_params / 1_000_000:.2f}M")
 
     pretrain_ckpt = os.path.join(cfg.ckpt_dir, cfg.pretrain_ckpt_name)
     sft1_ckpt = os.path.join(cfg.ckpt_dir, cfg.sft1_ckpt_name)
@@ -380,7 +384,9 @@ def main():
     print(f"Using device: {cfg.device}")
 
     if cfg.resume_pretrain_if_available and os.path.exists(pretrain_ckpt):
-        print(f"Found pretrain checkpoint, loading and skipping pretrain: {pretrain_ckpt}")
+        print(
+            f"Found pretrain checkpoint, loading and skipping pretrain: {pretrain_ckpt}"
+        )
         model.load_state_dict(torch.load(pretrain_ckpt, map_location=cfg.device))
     else:
         print("Stage 1: pretraining on FineWeb-EDU")
