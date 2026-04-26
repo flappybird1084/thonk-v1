@@ -4,12 +4,14 @@ import os
 import gradio as gr
 import torch
 
+from additional_dpo_v4 import DPOConfig
 from components.tokenizer import decode, encode, tokenizer
 from train_script_v4 import TrainConfig, build_model
 
 
-CFG = TrainConfig()
-DEVICE = CFG.device
+TRAIN_CFG = TrainConfig()
+DPO_CFG = DPOConfig()
+DEVICE = DPO_CFG.device
 MODEL = None
 EOT_TOKEN_ID = None
 
@@ -28,20 +30,17 @@ CONTROL_TOKEN_IDS = {
 
 def init_runtime(device_override: str | None):
     global MODEL, EOT_TOKEN_ID, DEVICE
-    DEVICE = device_override or CFG.device
+    DEVICE = device_override or DPO_CFG.device
     if DEVICE == "cuda" and not torch.cuda.is_available():
         raise ValueError("Requested --device cuda but CUDA is not available.")
-    CFG.device = DEVICE
 
-    model = build_model(CFG).to(DEVICE)
-    ckpt_candidates = [
-        os.path.join(CFG.ckpt_dir, CFG.sft2_ckpt_name),
-        os.path.join(CFG.ckpt_dir, CFG.sft1_ckpt_name),
-        os.path.join(CFG.ckpt_dir, CFG.pretrain_ckpt_name),
-    ]
-    ckpt_path = next((path for path in ckpt_candidates if os.path.exists(path)), None)
-    if ckpt_path is None:
-        raise FileNotFoundError(f"Checkpoint not found. Tried: {ckpt_candidates}")
+    DPO_CFG.device = DEVICE
+    TRAIN_CFG.device = DEVICE
+
+    model = build_model(TRAIN_CFG).to(DEVICE)
+    ckpt_path = os.path.join(DPO_CFG.ckpt_dir, DPO_CFG.out_ckpt_name)
+    if not os.path.exists(ckpt_path):
+        raise FileNotFoundError(f"DPO checkpoint not found: {ckpt_path}")
 
     state_dict = torch.load(ckpt_path, map_location=DEVICE)
     model.load_state_dict(state_dict)
@@ -49,7 +48,7 @@ def init_runtime(device_override: str | None):
 
     MODEL = model
     EOT_TOKEN_ID = get_eot_token_id()
-    print(f"Loaded checkpoint: {ckpt_path}")
+    print(f"Loaded DPO checkpoint: {ckpt_path}")
     print(f"Using device: {DEVICE}")
 
 
@@ -79,7 +78,7 @@ def generate_until_eot(
     min_new_tokens = 16
     visible_tokens: list[int] = []
     for step in range(max_new_tokens):
-        ctx = tokens[:, -CFG.block_size :]
+        ctx = tokens[:, -TRAIN_CFG.block_size :]
         logits = MODEL(ctx)[:, -1, :]
 
         if temperature <= 0:
@@ -110,15 +109,17 @@ def generate_until_eot(
 
 
 def build_ui() -> gr.Blocks:
-    with gr.Blocks(title="Thonk v4 Generator") as demo:
-        gr.Markdown("## Thonk v4 Text Generator")
+    with gr.Blocks(title="Thonk v4.1 DPO Generator") as demo:
+        gr.Markdown("## Thonk v4.1 DPO Text Generator")
         prompt = gr.Textbox(
             label="Prompt",
             lines=6,
             placeholder="Ask a question or give an instruction...",
         )
         with gr.Row():
-            max_new_tokens = gr.Slider(1, 512, value=180, step=1, label="Max New Tokens")
+            max_new_tokens = gr.Slider(
+                1, 512, value=180, step=1, label="Max New Tokens"
+            )
             temperature = gr.Slider(0.0, 2.0, value=0.8, step=0.05, label="Temperature")
             top_k = gr.Slider(0, 200, value=50, step=1, label="Top-k (0 disables)")
         run_btn = gr.Button("Generate", variant="primary")

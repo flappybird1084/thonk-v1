@@ -1,15 +1,34 @@
 import argparse
+import importlib.util
 import os
+from pathlib import Path
 
 import gradio as gr
 import torch
 
 from components.tokenizer import decode, encode, tokenizer
-from train_script_v4 import TrainConfig, build_model
 
+
+def load_train_module():
+    module_path = Path(__file__).resolve().parent / "train_script_v4_3-lightning.py"
+    if not module_path.exists():
+        raise FileNotFoundError(f"Training script not found: {module_path}")
+
+    spec = importlib.util.spec_from_file_location("train_script_v4_3_lightning", module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load module spec from: {module_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+TRAIN_MOD = load_train_module()
+TrainConfig = TRAIN_MOD.TrainConfig
+build_model = TRAIN_MOD.build_model
 
 CFG = TrainConfig()
-DEVICE = CFG.device
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 MODEL = None
 EOT_TOKEN_ID = None
 
@@ -28,13 +47,14 @@ CONTROL_TOKEN_IDS = {
 
 def init_runtime(device_override: str | None):
     global MODEL, EOT_TOKEN_ID, DEVICE
-    DEVICE = device_override or CFG.device
+    DEVICE = device_override or DEVICE
     if DEVICE == "cuda" and not torch.cuda.is_available():
         raise ValueError("Requested --device cuda but CUDA is not available.")
-    CFG.device = DEVICE
 
     model = build_model(CFG).to(DEVICE)
+
     ckpt_candidates = [
+        os.path.join(CFG.ckpt_dir, CFG.dpo_ckpt_name),
         os.path.join(CFG.ckpt_dir, CFG.sft2_ckpt_name),
         os.path.join(CFG.ckpt_dir, CFG.sft1_ckpt_name),
         os.path.join(CFG.ckpt_dir, CFG.pretrain_ckpt_name),
@@ -71,6 +91,7 @@ def generate_until_eot(
 ) -> str:
     if MODEL is None or EOT_TOKEN_ID is None:
         raise RuntimeError("Model is not initialized. Call init_runtime first.")
+
     prompt_text = maybe_format_prompt(prompt)
     token_list = encode(prompt_text)
     prompt_len = len(token_list)
@@ -78,6 +99,7 @@ def generate_until_eot(
 
     min_new_tokens = 16
     visible_tokens: list[int] = []
+
     for step in range(max_new_tokens):
         ctx = tokens[:, -CFG.block_size :]
         logits = MODEL(ctx)[:, -1, :]
@@ -102,6 +124,7 @@ def generate_until_eot(
     generated_tokens = tokens[0].tolist()[prompt_len:]
     if visible_tokens:
         return decode(visible_tokens).strip()
+
     raw_generated = decode(generated_tokens)
     raw_generated = raw_generated.replace("[ENDOFTEXT]", "").strip()
     if raw_generated:
@@ -110,15 +133,17 @@ def generate_until_eot(
 
 
 def build_ui() -> gr.Blocks:
-    with gr.Blocks(title="Thonk v4 Generator") as demo:
-        gr.Markdown("## Thonk v4 Text Generator")
+    with gr.Blocks(title="Thonk v4.3 Generator") as demo:
+        gr.Markdown("## Thonk v4.3 Text Generator")
         prompt = gr.Textbox(
             label="Prompt",
             lines=6,
             placeholder="Ask a question or give an instruction...",
         )
         with gr.Row():
-            max_new_tokens = gr.Slider(1, 512, value=180, step=1, label="Max New Tokens")
+            max_new_tokens = gr.Slider(
+                1, 512, value=180, step=1, label="Max New Tokens"
+            )
             temperature = gr.Slider(0.0, 2.0, value=0.8, step=0.05, label="Temperature")
             top_k = gr.Slider(0, 200, value=50, step=1, label="Top-k (0 disables)")
         run_btn = gr.Button("Generate", variant="primary")
@@ -129,6 +154,7 @@ def build_ui() -> gr.Blocks:
             inputs=[prompt, max_new_tokens, temperature, top_k],
             outputs=[output],
         )
+
     return demo
 
 
@@ -141,6 +167,7 @@ if __name__ == "__main__":
         help="Override runtime device.",
     )
     args = parser.parse_args()
+
     init_runtime(args.device)
     app = build_ui()
     app.launch(server_name="0.0.0.0", share=True)
