@@ -1,5 +1,6 @@
 import math
 import os
+import copy
 from dataclasses import dataclass
 
 import pytorch_lightning as pl
@@ -12,7 +13,13 @@ from pytorch_lightning.callbacks import (
     ModelCheckpoint,
 )
 from pytorch_lightning.loggers import TensorBoardLogger
-from torch.utils.data import DataLoader, Dataset, IterableDataset, get_worker_info
+from torch.utils.data import (
+    DataLoader,
+    Dataset,
+    IterableDataset,
+    RandomSampler,
+    get_worker_info,
+)
 
 from components.model import GPTModel
 from components.tokenizer import decode, encode, tokenizer
@@ -20,15 +27,15 @@ from components.tokenizer import decode, encode, tokenizer
 
 @dataclass
 class TrainConfig:
-    block_size: int = 256
+    block_size: int = 1024
     n_embedding: int = 1024
     n_layers: int = 8
     n_heads: int = 8
     dropout_p: float = 0.1
 
-    pretrain_batch_size: int = 64
-    sft_batch_size: int = 64
-    dpo_batch_size: int = 24
+    pretrain_batch_size: int = 16
+    sft_batch_size: int = 16
+    dpo_batch_size: int = 8
 
     pretrain_steps: int = 500000
     sft1_steps: int = 80000
@@ -56,10 +63,10 @@ class TrainConfig:
     log_every: int = 10
 
     ckpt_dir: str = "checkpoints"
-    pretrain_ckpt_name: str = "v4.3_pretrain.pth"
-    sft1_ckpt_name: str = "v4.3_sft1_chatbot_instruction_prompts.pth"
-    sft2_ckpt_name: str = "v4.3_sft2_alpaca.pth"
-    dpo_ckpt_name: str = "v4.3_dpo_ultrafeedback.pth"
+    pretrain_ckpt_name: str = "v4.4_pretrain.pth"
+    sft1_ckpt_name: str = "v4.4_sft1_chatbot_instruction_prompts_lora.pth"
+    sft2_ckpt_name: str = "v4.4_sft2_alpaca_lora.pth"
+    dpo_ckpt_name: str = "v4.4_dpo_ultrafeedback_lora.pth"
 
     resume_pretrain_if_available: bool = True
     resume_sft1_if_available: bool = True
@@ -67,6 +74,11 @@ class TrainConfig:
     resume_dpo_if_available: bool = True
 
     lightning_ckpt_every_n_steps: int = 500
+    lora_enable: bool = True
+    lora_r: int = 16
+    lora_alpha: float = 32.0
+    lora_dropout: float = 0.05
+    lora_target_modules: tuple[str, ...] = ("q_proj", "k_proj", "v_proj", "out_proj")
 
 
 class FineWebPretrainDataset(IterableDataset):
@@ -309,6 +321,78 @@ def build_model(cfg: TrainConfig) -> GPTModel:
     )
 
 
+class LoRALinear(nn.Module):
+    def __init__(self, base_linear: nn.Linear, r: int, alpha: float, dropout: float):
+        super().__init__()
+        if r <= 0:
+            raise ValueError("LoRA rank must be > 0.")
+
+        self.base = base_linear
+        self.r = r
+        self.scaling = alpha / float(r)
+        self.dropout = nn.Dropout(dropout)
+
+        self.lora_A = nn.Parameter(torch.empty(r, self.base.in_features))
+        self.lora_B = nn.Parameter(torch.zeros(self.base.out_features, r))
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+
+        self.base.weight.requires_grad_(False)
+        if self.base.bias is not None:
+            self.base.bias.requires_grad_(False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        base_out = self.base(x)
+        lora_out = (self.dropout(x) @ self.lora_A.t()) @ self.lora_B.t()
+        return base_out + (lora_out * self.scaling)
+
+
+def apply_lora_adapters(module: nn.Module, cfg: TrainConfig):
+    for name, child in list(module.named_children()):
+        if isinstance(child, LoRALinear):
+            continue
+        if isinstance(child, nn.Linear) and name in cfg.lora_target_modules:
+            setattr(
+                module,
+                name,
+                LoRALinear(
+                    base_linear=child,
+                    r=cfg.lora_r,
+                    alpha=cfg.lora_alpha,
+                    dropout=cfg.lora_dropout,
+                ),
+            )
+        else:
+            apply_lora_adapters(child, cfg)
+
+
+def has_lora(module: nn.Module) -> bool:
+    return any(isinstance(m, LoRALinear) for m in module.modules())
+
+
+def mark_only_lora_trainable(model: nn.Module):
+    for p in model.parameters():
+        p.requires_grad_(False)
+    for m in model.modules():
+        if isinstance(m, LoRALinear):
+            m.lora_A.requires_grad_(True)
+            m.lora_B.requires_grad_(True)
+
+
+def maybe_enable_lora_for_finetuning(model: nn.Module, cfg: TrainConfig):
+    if not cfg.lora_enable:
+        return
+    if not has_lora(model):
+        apply_lora_adapters(model, cfg)
+    mark_only_lora_trainable(model)
+
+
+def print_parameter_stats(model: nn.Module, prefix: str):
+    total = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    pct = (100.0 * trainable / total) if total else 0.0
+    print(f"{prefix} trainable params: {trainable:,} / {total:,} ({pct:.2f}%)")
+
+
 def build_optimizer(
     model: nn.Module, learning_rate: float, weight_decay: float, device: str
 ):
@@ -451,8 +535,7 @@ class DPOLightningModule(BaseLightningModule):
             learning_rate=cfg.dpo_learning_rate,
             total_steps=total_steps,
         )
-        self.ref_model = build_model(cfg)
-        self.ref_model.load_state_dict(model.state_dict())
+        self.ref_model = copy.deepcopy(model)
         self.ref_model.eval()
         for p in self.ref_model.parameters():
             p.requires_grad_(False)
@@ -516,13 +599,24 @@ def make_loader(
     device: str,
     shuffle: bool,
     prefetch_factor: int,
+    total_steps: int,
 ):
     loader_kwargs = {
         "batch_size": batch_size,
-        "shuffle": shuffle,
         "num_workers": num_workers,
         "pin_memory": (device == "cuda"),
     }
+    if isinstance(dataset, IterableDataset):
+        loader_kwargs["shuffle"] = False
+    else:
+        if shuffle:
+            loader_kwargs["sampler"] = RandomSampler(
+                dataset,
+                replacement=True,
+                num_samples=batch_size * total_steps,
+            )
+        else:
+            loader_kwargs["shuffle"] = False
     if device == "cuda":
         loader_kwargs["pin_memory_device"] = "cuda"
     if num_workers > 0:
@@ -562,7 +656,7 @@ def make_trainer(cfg: TrainConfig, stage_name: str, max_steps: int):
         devices=1,
         precision=precision,
         max_steps=max_steps,
-        max_epochs=-1,
+        max_epochs=1,
         limit_train_batches=max_steps,
         accumulate_grad_batches=cfg.grad_accum_steps,
         gradient_clip_val=cfg.grad_clip,
@@ -625,6 +719,7 @@ def main():
 
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {total_params / 1_000_000:.2f}M")
+    print_parameter_stats(model, prefix="Pretrain")
     print(f"Using device: {device}")
 
     pretrain_ckpt = os.path.join(cfg.ckpt_dir, cfg.pretrain_ckpt_name)
@@ -647,6 +742,7 @@ def main():
             device=device,
             shuffle=False,
             prefetch_factor=cfg.prefetch_factor,
+            total_steps=cfg.pretrain_steps,
         )
         pretrain_module = CausalLMLightningModule(
             model=model,
@@ -660,6 +756,10 @@ def main():
         pretrain_trainer.fit(pretrain_module, train_dataloaders=pretrain_loader)
         save_checkpoint(model, pretrain_ckpt)
         print(f"Saved pretrain checkpoint: {pretrain_ckpt}")
+
+    # LoRA applies only to SFT and DPO stages.
+    maybe_enable_lora_for_finetuning(model, cfg)
+    print_parameter_stats(model, prefix="SFT/DPO (LoRA)")
 
     if cfg.resume_sft1_if_available and os.path.exists(sft1_ckpt):
         print(f"Found SFT1 checkpoint, loading and skipping SFT1: {sft1_ckpt}")
@@ -677,6 +777,7 @@ def main():
             device=device,
             shuffle=True,
             prefetch_factor=cfg.prefetch_factor,
+            total_steps=cfg.sft1_steps,
         )
         sft1_module = CausalLMLightningModule(
             model=model,
@@ -704,6 +805,7 @@ def main():
             device=device,
             shuffle=True,
             prefetch_factor=cfg.prefetch_factor,
+            total_steps=cfg.sft2_steps,
         )
         sft2_module = CausalLMLightningModule(
             model=model,
@@ -731,6 +833,7 @@ def main():
             device=device,
             shuffle=True,
             prefetch_factor=cfg.prefetch_factor,
+            total_steps=cfg.dpo_steps,
         )
         dpo_module = DPOLightningModule(
             model=model,
