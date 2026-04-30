@@ -74,6 +74,7 @@ def init_runtime(device_override: str | None):
                 "Checkpoint has LoRA weights but apply_lora_adapters is unavailable."
             )
         apply_lora_adapters(model, CFG)
+        model = model.to(DEVICE)
     model.load_state_dict(state_dict)
     model.eval()
 

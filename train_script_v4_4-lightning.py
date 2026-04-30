@@ -332,8 +332,22 @@ class LoRALinear(nn.Module):
         self.scaling = alpha / float(r)
         self.dropout = nn.Dropout(dropout)
 
-        self.lora_A = nn.Parameter(torch.empty(r, self.base.in_features))
-        self.lora_B = nn.Parameter(torch.zeros(self.base.out_features, r))
+        self.lora_A = nn.Parameter(
+            torch.empty(
+                r,
+                self.base.in_features,
+                device=self.base.weight.device,
+                dtype=self.base.weight.dtype,
+            )
+        )
+        self.lora_B = nn.Parameter(
+            torch.zeros(
+                self.base.out_features,
+                r,
+                device=self.base.weight.device,
+                dtype=self.base.weight.dtype,
+            )
+        )
         nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
 
         self.base.weight.requires_grad_(False)
