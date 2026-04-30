@@ -26,6 +26,7 @@ def load_train_module():
 TRAIN_MOD = load_train_module()
 TrainConfig = TRAIN_MOD.TrainConfig
 build_model = TRAIN_MOD.build_model
+apply_lora_adapters = getattr(TRAIN_MOD, "apply_lora_adapters", None)
 
 CFG = TrainConfig()
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -64,6 +65,15 @@ def init_runtime(device_override: str | None):
         raise FileNotFoundError(f"Checkpoint not found. Tried: {ckpt_candidates}")
 
     state_dict = torch.load(ckpt_path, map_location=DEVICE)
+    has_lora_weights = any(
+        key.endswith(".lora_A") or key.endswith(".lora_B") for key in state_dict
+    )
+    if has_lora_weights:
+        if apply_lora_adapters is None:
+            raise RuntimeError(
+                "Checkpoint has LoRA weights but apply_lora_adapters is unavailable."
+            )
+        apply_lora_adapters(model, CFG)
     model.load_state_dict(state_dict)
     model.eval()
 
