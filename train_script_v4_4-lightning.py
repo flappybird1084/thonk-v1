@@ -27,7 +27,7 @@ from components.tokenizer import decode, encode, tokenizer
 
 @dataclass
 class TrainConfig:
-    block_size: int = 1024
+    block_size: int = 4096
     n_embedding: int = 1024
     n_layers: int = 8
     n_heads: int = 8

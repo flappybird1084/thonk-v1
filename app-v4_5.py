@@ -1,5 +1,6 @@
 import argparse
 import importlib.util
+import math
 import os
 from pathlib import Path
 
@@ -44,6 +45,12 @@ def get_eot_token_id() -> int:
 CONTROL_TOKEN_IDS = {
     tid for tok in ("[STARTOFTEXT]", "[INST]", "[/INST]") for tid in encode(tok)
 }
+ANSWER_START_TOKEN_IDS = {
+    toks[0]
+    for toks in (encode("<answer>"), encode(" <answer>"))
+    if len(toks) > 0
+}
+ANSWER_TOKEN_PENALTY_MAX = 8.0
 
 
 def init_runtime(device_override: str | None):
@@ -101,6 +108,9 @@ def generate_until_eot(
     max_new_tokens: int,
     temperature: float,
     top_k: int,
+    ideal_output_tokens_before_answer: int,
+    repeat_penalty: float,
+    multi_word_repeat_penalty: float,
 ) -> str:
     if MODEL is None or EOT_TOKEN_ID is None:
         raise RuntimeError("Model is not initialized. Call init_runtime first.")
@@ -116,6 +126,45 @@ def generate_until_eot(
     for step in range(max_new_tokens):
         ctx = tokens[:, -CFG.block_size :]
         logits = MODEL(ctx)[:, -1, :]
+        generated_so_far = int(tokens.size(1) - prompt_len)
+
+        if (
+            ideal_output_tokens_before_answer > 0
+            and generated_so_far < ideal_output_tokens_before_answer
+            and (ANSWER_START_TOKEN_IDS or EOT_TOKEN_ID is not None)
+        ):
+            progress = generated_so_far / float(ideal_output_tokens_before_answer)
+            decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+            answer_penalty = ANSWER_TOKEN_PENALTY_MAX * decay
+            for token_id in ANSWER_START_TOKEN_IDS:
+                logits[:, token_id] -= answer_penalty
+            logits[:, EOT_TOKEN_ID] -= answer_penalty
+
+        generated_tokens = tokens[0, prompt_len:].tolist()
+        if repeat_penalty > 1.0 and generated_tokens:
+            for token_id in set(generated_tokens):
+                token_logit = logits[:, token_id]
+                logits[:, token_id] = torch.where(
+                    token_logit > 0,
+                    token_logit / repeat_penalty,
+                    token_logit * repeat_penalty,
+                )
+
+        # Multi-word repeat penalty: penalize tokens that previously followed
+        # the same 2-token context (3-gram continuation repetition).
+        if multi_word_repeat_penalty > 1.0 and len(generated_tokens) >= 2:
+            prev2 = (generated_tokens[-2], generated_tokens[-1])
+            repeated_next: set[int] = set()
+            for i in range(len(generated_tokens) - 2):
+                if (generated_tokens[i], generated_tokens[i + 1]) == prev2:
+                    repeated_next.add(generated_tokens[i + 2])
+            for token_id in repeated_next:
+                token_logit = logits[:, token_id]
+                logits[:, token_id] = torch.where(
+                    token_logit > 0,
+                    token_logit / multi_word_repeat_penalty,
+                    token_logit * multi_word_repeat_penalty,
+                )
 
         if temperature <= 0:
             next_token = torch.argmax(logits, dim=-1, keepdim=True)
@@ -159,12 +208,34 @@ def build_ui() -> gr.Blocks:
             )
             temperature = gr.Slider(0.0, 2.0, value=0.8, step=0.05, label="Temperature")
             top_k = gr.Slider(0, 200, value=50, step=1, label="Top-k (0 disables)")
+        with gr.Row():
+            repeat_penalty = gr.Slider(
+                1.0, 2.5, value=1.1, step=0.01, label="Repeat Penalty"
+            )
+            multi_word_repeat_penalty = gr.Slider(
+                1.0, 2.5, value=1.15, step=0.01, label="Multi-word Repeat Penalty"
+            )
+        ideal_output_tokens_before_answer = gr.Slider(
+            0,
+            256,
+            value=256,
+            step=1,
+            label="Ideal Output Tokens Before Answer",
+        )
         run_btn = gr.Button("Generate", variant="primary")
         output = gr.Textbox(label="Output", lines=12)
 
         run_btn.click(
             fn=generate_until_eot,
-            inputs=[prompt, max_new_tokens, temperature, top_k],
+            inputs=[
+                prompt,
+                max_new_tokens,
+                temperature,
+                top_k,
+                ideal_output_tokens_before_answer,
+                repeat_penalty,
+                multi_word_repeat_penalty,
+            ],
             outputs=[output],
         )
 

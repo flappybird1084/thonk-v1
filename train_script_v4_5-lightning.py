@@ -32,8 +32,9 @@ V44 = load_v44_module()
 
 @dataclass
 class TrainConfig(V44.TrainConfig):
-    cot_batch_size: int = 16
-    cot_steps: int = 40000
+    cot_batch_size: int = 6
+    cot_grad_accum_steps: int = 16
+    cot_steps: int = 400000
     cot_learning_rate: float = 2e-5
     cot_ckpt_name: str = "v4.5_cot_collection_on_dpo_lora.pth"
     resume_cot_if_available: bool = True
@@ -254,18 +255,30 @@ def main():
     print(f"Using device: {device}")
 
     dpo_ckpt = os.path.join(cfg.ckpt_dir, cfg.dpo_ckpt_name)
+    sft2_ckpt = os.path.join(cfg.ckpt_dir, cfg.sft2_ckpt_name)
+    sft1_ckpt = os.path.join(cfg.ckpt_dir, cfg.sft1_ckpt_name)
+    pretrain_ckpt = os.path.join(cfg.ckpt_dir, cfg.pretrain_ckpt_name)
     cot_ckpt = os.path.join(cfg.ckpt_dir, cfg.cot_ckpt_name)
 
-    # v4.5 stage is intentionally only run on top of DPO.
-    V44.maybe_enable_lora_for_finetuning(model, cfg)
+    # Pick highest-stage available v4.4 checkpoint.
+    base_candidates = [dpo_ckpt, sft2_ckpt, sft1_ckpt, pretrain_ckpt]
+    base_ckpt = next((path for path in base_candidates if os.path.exists(path)), None)
+    if base_ckpt is None:
+        raise FileNotFoundError(f"No base checkpoint found. Tried: {base_candidates}")
 
-    if not os.path.exists(dpo_ckpt):
-        raise FileNotFoundError(
-            f"Required DPO checkpoint not found for v4.5 stage: {dpo_ckpt}"
-        )
-
-    print(f"Loading base checkpoint for v4.5 stage: {dpo_ckpt}")
-    model.load_state_dict(torch.load(dpo_ckpt, map_location=device))
+    base_state = torch.load(base_ckpt, map_location=device)
+    has_lora_weights = any(
+        k.endswith(".lora_A") or k.endswith(".lora_B") for k in base_state.keys()
+    )
+    print(f"Loading base checkpoint for v4.5 stage: {base_ckpt}")
+    if has_lora_weights:
+        # LoRA checkpoints need adapter modules present before loading.
+        V44.maybe_enable_lora_for_finetuning(model, cfg)
+        model.load_state_dict(base_state)
+    else:
+        # Plain checkpoints load into plain model first, then adapters are attached.
+        model.load_state_dict(base_state)
+        V44.maybe_enable_lora_for_finetuning(model, cfg)
 
     if cfg.resume_cot_if_available and os.path.exists(cot_ckpt):
         print(f"Found CoT v4.5 checkpoint, loading and skipping stage: {cot_ckpt}")
@@ -293,6 +306,7 @@ def main():
             total_steps=cfg.cot_steps,
         )
         module = V44.maybe_compile_lightning_module(module, cfg)
+        cfg.grad_accum_steps = cfg.cot_grad_accum_steps
         trainer = V44.make_trainer(cfg, "cot_collection", cfg.cot_steps)
         trainer.fit(module, train_dataloaders=train_loader)
 
