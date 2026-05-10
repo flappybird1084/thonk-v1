@@ -88,6 +88,7 @@ class CoTCollectionSFTDataset(IterableDataset):
     def _stream_top_level_object_values(path: str):
         decoder = json.JSONDecoder()
         chunk_size = 1 << 20
+        warned_recovery = False
         with open(path, "r", encoding="utf-8") as f:
             buf = ""
             pos = 0
@@ -185,18 +186,38 @@ class CoTCollectionSFTDataset(IterableDataset):
 
                 while pos < len(buf) and buf[pos].isspace():
                     pos += 1
+                skipped_malformed_value = False
+                decode_failures = 0
                 while True:
                     try:
                         value, pos = decoder.raw_decode(buf, pos)
                         break
-                    except json.JSONDecodeError:
-                        if eof:
-                            raise
+                    except json.JSONDecodeError as e:
+                        decode_failures += 1
+                        if decode_failures >= 8 or eof:
+                            # Give up on this value and resync at the next top-level key.
+                            next_key = buf.find('\n    "', pos + 1)
+                            if next_key != -1:
+                                if not warned_recovery:
+                                    print(
+                                        "Warning: malformed CoT JSON segment detected; "
+                                        "skipping bad entry and continuing."
+                                    )
+                                    warned_recovery = True
+                                pos = next_key + 1
+                                skipped_malformed_value = True
+                                break
+                            if eof:
+                                raise e
+
                         chunk = f.read(chunk_size)
                         if not chunk:
                             eof = True
                         else:
                             buf += chunk
+
+                if skipped_malformed_value:
+                    continue
 
                 yield value
 
